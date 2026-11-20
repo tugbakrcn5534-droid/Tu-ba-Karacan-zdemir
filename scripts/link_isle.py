@@ -49,6 +49,16 @@ def indir(url, gecici):
     return video, bilgi
 
 
+def video_suresi(video):
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "default=nw=1:nk=1", str(video)],
+                             capture_output=True, text=True, check=True).stdout
+        return float(out.strip())
+    except Exception:
+        return 0.0
+
+
 def kareler(video, hedef, sure):
     sure = max(float(sure or 0), 1.0)
     adet = min(MAKS_KARE, max(4, int(sure // 3)))
@@ -70,10 +80,21 @@ def dokum(video):
         from faster_whisper import WhisperModel
     except ImportError:
         return "_(faster-whisper kurulu değil, döküm atlandı)_", None
-    model = WhisperModel(os.environ.get("WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
-    parcalar, info = model.transcribe(str(video), vad_filter=True)
-    satirlar = [f"[{p.start:05.1f}s] {p.text.strip()}" for p in parcalar]
-    return ("\n".join(satirlar) or "_(konuşma bulunamadı)_"), info.language
+    import numpy as np
+    try:
+        # Sesi ffmpeg ile 16 kHz mono olarak çöz (PyAV sürüm sorunlarından kaçınmak için)
+        ham = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(video), "-vn", "-ac", "1",
+                              "-ar", "16000", "-f", "s16le", "-"], capture_output=True, check=True).stdout
+        if not ham:
+            return "_(videoda ses yok)_", None
+        ses = np.frombuffer(ham, np.int16).astype(np.float32) / 32768.0
+        model = WhisperModel(os.environ.get("WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
+        parcalar, info = model.transcribe(ses, vad_filter=True)
+        satirlar = [f"[{p.start:05.1f}s] {p.text.strip()}" for p in parcalar]
+        return ("\n".join(satirlar) or "_(konuşma bulunamadı)_"), info.language
+    except Exception as e:
+        print(f"Döküm hatası: {e}", flush=True)
+        return f"_(döküm yapılamadı: {e})_", None
 
 
 def main():
@@ -85,7 +106,7 @@ def main():
 
     hedef = CIKTI_KOK / klasor_adi(bilgi, url)
     hedef.mkdir(parents=True, exist_ok=True)
-    sure = bilgi.get("duration")
+    sure = bilgi.get("duration") or video_suresi(video)
     kare_sayisi = kareler(video, hedef, sure)
     metin, dil = dokum(video)
 
